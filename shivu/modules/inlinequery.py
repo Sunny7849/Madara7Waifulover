@@ -2,11 +2,10 @@ import re
 import time
 from html import escape
 from cachetools import TTLCache
-from pymongo import MongoClient, ASCENDING
+from pymongo import ASCENDING
 
 from telegram import Update, InlineQueryResultPhoto
-from telegram.ext import InlineQueryHandler, CallbackContext, CommandHandler 
-from telegram import InlineKeyboardButton, InlineKeyboardMarkup
+from telegram.ext import InlineQueryHandler, CallbackContext 
 
 from shivu import user_collection, collection, application, db
 

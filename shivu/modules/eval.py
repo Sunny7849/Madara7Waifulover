@@ -8,9 +8,8 @@ from contextlib import redirect_stdout
 
 from shivu import application, LOGGER
 from telegram import Update
-from telegram.constants import ChatID, ParseMode
+from telegram.constants import ParseMode
 from telegram.ext import ContextTypes, CommandHandler
-from telegram.ext import CallbackContext 
 
 namespaces = {}
 DEV_LIST = [6404226395]
