@@ -1,175 +1,166 @@
-import urllib.request
-from pymongo import ReturnDocument
-
+import importlib
+import time
+import random
+import re
+import asyncio
+from html import escape
+from telegram import InlineKeyboardButton, InlineKeyboardMarkup
 from telegram import Update
-from telegram.ext import CommandHandler, CallbackContext
-
-from shivu import application, sudo_users, collection, db, CHARA_CHANNEL_ID, SUPPORT_CHAT
-
-WRONG_FORMAT_TEXT = """Wrong ❌️ format...  eg. /upload Img_url muzan-kibutsuji Demon-slayer 3
-
-img_url character-name anime-name rarity-number
-
-use rarity number accordingly rarity Map
-
-rarity_map = 1 (⚪️ Common), 2 (🟣 Rare) , 3 (🟡 Legendary), 4 (🟢 Medium)"""
-
-
-
-async def get_next_sequence_number(sequence_name):
-    sequence_collection = db.sequences
-    sequence_document = await sequence_collection.find_one_and_update(
-        {'_id': sequence_name}, 
-        {'$inc': {'sequence_value': 1}}, 
-        return_document=ReturnDocument.AFTER
+from telegram.ext import CommandHandler, CallbackContext, MessageHandler, filters
+from shivu import collection, top_global_groups_collection, group_user_totals_collection, user_collection, user_totals_collection, shivuu
+from shivu import application, SUPPORT_CHAT, UPDATE_CHAT, db, LOGGER
+from shivu.modules import ALL_MODULES
+locks = {}
+message_counters = {}
+spam_counters = {}
+last_characters = {}
+sent_characters = {}
+first_correct_guesses = {}
+message_counts = {}
+for module_name in ALL_MODULES:
+    imported_module = importlib.import_module("shivu.modules." + module_name)
+last_user = {}
+warned_users = {}
+def escape_markdown(text):
+    escape_chars = r'\*_`\\~>#+-=|{}.!'
+    return re.sub(r'([%s])' % re.escape(escape_chars), r'\\\1', text)
+async def message_counter(update: Update, context: CallbackContext) -> None:
+    chat_id = str(update.effective_chat.id)
+    user_id = update.effective_user.id
+    if chat_id not in locks:
+        locks[chat_id] = asyncio.Lock()
+    lock = locks[chat_id]
+    async with lock:
+        chat_frequency = await user_totals_collection.find_one({'chat_id': chat_id})
+        message_frequency = chat_frequency.get('message_frequency', 5) if chat_frequency else 5
+        if chat_id in last_user and last_user[chat_id]['user_id'] == user_id:
+            last_user[chat_id]['count'] += 1
+            if last_user[chat_id]['count'] >= 10:
+                if user_id in warned_users and time.time() - warned_users[user_id] < 600:
+                    return
+                else:
+                    await update.message.reply_text(f"⚠️ Don't Spam {update.effective_user.first_name}...\nYour Messages Will be ignored for 10 Minutes...")
+                    warned_users[user_id] = time.time()
+                    return
+        else:
+            last_user[chat_id] = {'user_id': user_id, 'count': 1}
+        message_counts[chat_id] = message_counts.get(chat_id, 0) + 1
+        if message_counts[chat_id] % message_frequency == 0:
+            await send_image(update, context)
+            message_counts[chat_id] = 0
+async def send_image(update: Update, context: CallbackContext) -> None:
+    chat_id = update.effective_chat.id
+    all_characters = list(await collection.find({}).to_list(length=None))
+    if chat_id not in sent_characters:
+        sent_characters[chat_id] = []
+    if len(sent_characters[chat_id]) == len(all_characters):
+        sent_characters[chat_id] = []
+    character = random.choice([c for c in all_characters if c['id'] not in sent_characters[chat_id]])
+    sent_characters[chat_id].append(character['id'])
+    last_characters[chat_id] = character
+    if chat_id in first_correct_guesses:
+        del first_correct_guesses[chat_id]
+    await context.bot.send_photo(
+        chat_id=chat_id,
+        photo=character.get('img_file_id') or character.get('img_url'),
+        caption=f"""A New {character['rarity']} Character Appeared...\n/guess Character Name and add in Your Harem""",
+        parse_mode='Markdown'
     )
-    if not sequence_document:
-        await sequence_collection.insert_one({'_id': sequence_name, 'sequence_value': 0})
-        return 0
-    return sequence_document['sequence_value']
-
-async def upload(update: Update, context: CallbackContext) -> None:
-    if str(update.effective_user.id) not in sudo_users:
-        await update.message.reply_text('Ask My Owner...')
+async def guess(update: Update, context: CallbackContext) -> None:
+    chat_id = update.effective_chat.id
+    user_id = update.effective_user.id
+    if chat_id not in last_characters:
         return
-
-    try:
-        args = context.args
-        if len(args) != 4:
-            await update.message.reply_text(WRONG_FORMAT_TEXT)
-            return
-
-        character_name = args[1].replace('-', ' ').title()
-        anime = args[2].replace('-', ' ').title()
-
-        try:
-            urllib.request.urlopen(args[0])
-        except:
-            await update.message.reply_text('Invalid URL.')
-            return
-
-        rarity_map = {1: "⚪ Common", 2: "🟣 Rare", 3: "🟡 Legendary", 4: "🟢 Medium"}
-        try:
-            rarity = rarity_map[int(args[3])]
-        except KeyError:
-            await update.message.reply_text('Invalid rarity. Please use 1, 2, 3, 4, or 5.')
-            return
-
-        id = str(await get_next_sequence_number('character_id')).zfill(2)
-
-        character = {
-            'img_url': args[0],
-            'name': character_name,
-            'anime': anime,
-            'rarity': rarity,
-            'id': id
-        }
-
-        try:
-            message = await context.bot.send_photo(
-                chat_id=CHARA_CHANNEL_ID,
-                photo=args[0],
-                caption=f'<b>Character Name:</b> {character_name}\n<b>Anime Name:</b> {anime}\n<b>Rarity:</b> {rarity}\n<b>ID:</b> {id}\nAdded by <a href="tg://user?id={update.effective_user.id}">{update.effective_user.first_name}</a>',
-                parse_mode='HTML'
-            )
-            character['message_id'] = message.message_id
-            await collection.insert_one(character)
-            await update.message.reply_text('CHARACTER ADDED....')
-        except:
-            await collection.insert_one(character)
-            update.effective_message.reply_text("Character Added but no Database Channel Found, Consider adding one.")
-        
-    except Exception as e:
-        await update.message.reply_text(f'Character Upload Unsuccessful. Error: {str(e)}\nIf you think this is a source error, forward to: {SUPPORT_CHAT}')
-
-async def delete(update: Update, context: CallbackContext) -> None:
-    if str(update.effective_user.id) not in sudo_users:
-        await update.message.reply_text('Ask my Owner to use this Command...')
+    if chat_id in first_correct_guesses:
+        await update.message.reply_text(f'❌   Already Guessed By Someone.. Try Next Time Bruhh ')
         return
-
-    try:
-        args = context.args
-        if len(args) != 1:
-            await update.message.reply_text('Incorrect format... Please use: /delete ID')
-            return
-
-        
-        character = await collection.find_one_and_delete({'id': args[0]})
-
-        if character:
-            
-            await context.bot.delete_message(chat_id=CHARA_CHANNEL_ID, message_id=character['message_id'])
-            await update.message.reply_text('DONE')
-        else:
-            await update.message.reply_text('Deleted Successfully from db, but character not found In Channel')
-    except Exception as e:
-        await update.message.reply_text(f'{str(e)}')
-
-async def update(update: Update, context: CallbackContext) -> None:
-    if str(update.effective_user.id) not in sudo_users:
-        await update.message.reply_text('You do not have permission to use this command.')
+    guess = ' '.join(context.args).lower() if context.args else ''
+    if "()" in guess or "&" in guess.lower():
+        await update.message.reply_text("Nahh You Can't use This Types of words in your guess..❌  ")
         return
-
-    try:
-        args = context.args
-        if len(args) != 3:
-            await update.message.reply_text('Incorrect format. Please use: /update id field new_value')
-            return
-
-        # Get character by ID
-        character = await collection.find_one({'id': args[0]})
-        if not character:
-            await update.message.reply_text('Character not found.')
-            return
-
-        # Check if field is valid
-        valid_fields = ['img_url', 'name', 'anime', 'rarity']
-        if args[1] not in valid_fields:
-            await update.message.reply_text(f'Invalid field. Please use one of the following: {", ".join(valid_fields)}')
-            return
-
-        # Update field
-        if args[1] in ['name', 'anime']:
-            new_value = args[2].replace('-', ' ').title()
-        elif args[1] == 'rarity':
-            rarity_map = {1: "⚪ Common", 2: "🟣 Rare", 3: "🟡 Legendary", 4: "🟢 Medium", 5: "💮 Special edition"}
-            try:
-                new_value = rarity_map[int(args[2])]
-            except KeyError:
-                await update.message.reply_text('Invalid rarity. Please use 1, 2, 3, 4, or 5.')
-                return
+    name_parts = last_characters[chat_id]['name'].lower().split()
+    if sorted(name_parts) == sorted(guess.split()) or any(part == guess for part in name_parts):
+        first_correct_guesses[chat_id] = user_id
+        user = await user_collection.find_one({'id': user_id})
+        if user:
+            update_fields = {}
+            if hasattr(update.effective_user, 'username') and update.effective_user.username != user.get('username'):
+                update_fields['username'] = update.effective_user.username
+            if update.effective_user.first_name != user.get('first_name'):
+                update_fields['first_name'] = update.effective_user.first_name
+            if update_fields:
+                await user_collection.update_one({'id': user_id}, {'$set': update_fields})
+            await user_collection.update_one({'id': user_id}, {'$push': {'characters': last_characters[chat_id]}})
+        elif hasattr(update.effective_user, 'username'):
+            await user_collection.insert_one({
+                'id': user_id,
+                'username': update.effective_user.username,
+                'first_name': update.effective_user.first_name,
+                'characters': [last_characters[chat_id]],
+            })
+        group_user_total = await group_user_totals_collection.find_one({'user_id': user_id, 'group_id': chat_id})
+        if group_user_total:
+            update_fields = {}
+            if hasattr(update.effective_user, 'username') and update.effective_user.username != group_user_total.get('username'):
+                update_fields['username'] = update.effective_user.username
+            if update.effective_user.first_name != group_user_total.get('first_name'):
+                update_fields['first_name'] = update.effective_user.first_name
+            if update_fields:
+                await group_user_totals_collection.update_one({'user_id': user_id, 'group_id': chat_id}, {'$set': update_fields})
+            await group_user_totals_collection.update_one({'user_id': user_id, 'group_id': chat_id}, {'$inc': {'count': 1}})
         else:
-            new_value = args[2]
-
-        await collection.find_one_and_update({'id': args[0]}, {'$set': {args[1]: new_value}})
-
-        
-        if args[1] == 'img_url':
-            await context.bot.delete_message(chat_id=CHARA_CHANNEL_ID, message_id=character['message_id'])
-            message = await context.bot.send_photo(
-                chat_id=CHARA_CHANNEL_ID,
-                photo=new_value,
-                caption=f'<b>Character Name:</b> {character["name"]}\n<b>Anime Name:</b> {character["anime"]}\n<b>Rarity:</b> {character["rarity"]}\n<b>ID:</b> {character["id"]}\nUpdated by <a href="tg://user?id={update.effective_user.id}">{update.effective_user.first_name}</a>',
-                parse_mode='HTML'
-            )
-            character['message_id'] = message.message_id
-            await collection.find_one_and_update({'id': args[0]}, {'$set': {'message_id': message.message_id}})
+            await group_user_totals_collection.insert_one({
+                'user_id': user_id,
+                'group_id': chat_id,
+                'username': update.effective_user.username,
+                'first_name': update.effective_user.first_name,
+                'count': 1,
+            })
+        group_info = await top_global_groups_collection.find_one({'group_id': chat_id})
+        if group_info:
+            update_fields = {}
+            if update.effective_chat.title != group_info.get('group_name'):
+                update_fields['group_name'] = update.effective_chat.title
+            if update_fields:
+                await top_global_groups_collection.update_one({'group_id': chat_id}, {'$set': update_fields})
+            await top_global_groups_collection.update_one({'group_id': chat_id}, {'$inc': {'count': 1}})
         else:
-            
-            await context.bot.edit_message_caption(
-                chat_id=CHARA_CHANNEL_ID,
-                message_id=character['message_id'],
-                caption=f'<b>Character Name:</b> {character["name"]}\n<b>Anime Name:</b> {character["anime"]}\n<b>Rarity:</b> {character["rarity"]}\n<b>ID:</b> {character["id"]}\nUpdated by <a href="tg://user?id={update.effective_user.id}">{update.effective_user.first_name}</a>',
-                parse_mode='HTML'
-            )
-
-        await update.message.reply_text('Updated Done in Database.... But sometimes it Takes Time to edit Caption in Your Channel..So wait..')
-    except Exception as e:
-        await update.message.reply_text(f'I guess did not added bot in channel.. or character uploaded Long time ago.. Or character not exits.. orr Wrong id')
-
-UPLOAD_HANDLER = CommandHandler('upload', upload, block=False)
-application.add_handler(UPLOAD_HANDLER)
-DELETE_HANDLER = CommandHandler('delete', delete, block=False)
-application.add_handler(DELETE_HANDLER)
-UPDATE_HANDLER = CommandHandler('update', update, block=False)
-application.add_handler(UPDATE_HANDLER)
+            await top_global_groups_collection.insert_one({
+                'group_id': chat_id,
+                'group_name': update.effective_chat.title,
+                'count': 1,
+            })
+        keyboard = [[InlineKeyboardButton(f"See Harem", switch_inline_query_current_chat=f"collection.{user_id}")]]
+        await update.message.reply_text(
+            f'<b><a href="tg://user?id={user_id}">{escape(update.effective_user.first_name)}</a></b> You Guessed a New Character ✅   \n\n𝗡𝗔𝗠𝗘: <b>{last_characters[chat_id]["name"]}</b> \n𝗔𝗡𝗜𝗠𝗘: <b>{last_characters[chat_id]["anime"]}</b> \n𝗥𝗔𝗜𝗥𝗧𝗬:cters[chat_id]["rarity"]}</b>\n\nThis Character added in Your harem.. use /harem To see',
+            parse_mode='HTML',
+            reply_markup=InlineKeyboardMarkup(keyboard)
+        )
+    else:
+        await update.message.reply_text('Please Write Correct Character Name... ❌  ')
+async def fav(update: Update, context: CallbackContext) -> None:
+    user_id = update.effective_user.id
+    if not context.args:
+        await update.message.reply_text('Please provide Character id...')
+        return
+    character_id = context.args[0]
+    user = await user_collection.find_one({'id': user_id})
+    if not user:
+        await update.message.reply_text('You have not Guessed any characters yet....')
+        return
+    character = next((c for c in user['characters'] if c['id'] == character_id), None)
+    if not character:
+        await update.message.reply_text('This Character is Not In your collection')
+        return
+    user['favorites'] = [character_id]
+    await user_collection.update_one({'id': user_id}, {'$set': {'favorites': user['favorites']}})
+    await update.message.reply_text(f'Character {character["name"]} has been added to your favorite...')
+def main() -> None:
+    application.add_handler(CommandHandler(["guess", "protecc", "collect", "grab", "hunt"], guess, block=False))
+    application.add_handler(CommandHandler("fav", fav, block=False))
+    application.add_handler(MessageHandler(filters.ALL, message_counter, block=False))
+    application.run_polling(drop_pending_updates=True)
+if __name__ == "__main__":
+    shivuu.start()
+    LOGGER.info("Bot started")
+    main()
