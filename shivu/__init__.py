@@ -17,7 +17,6 @@ LOGGER = logging.getLogger(__name__)
 
 from shivu.config import Development as Config
 
-
 api_id = Config.api_id
 api_hash = Config.api_hash
 TOKEN = Config.TOKEN
@@ -41,3 +40,9 @@ user_collection = db["user_collection_lmaoooo"]
 group_user_totals_collection = db['group_user_totalsssssss']
 top_global_groups_collection = db['top_global_groups']
 pm_users = db['total_pm_users']
+
+# FIXED PART: import last_characters if available
+try:
+    from .modules.last_characters import last_characters
+except ImportError:
+    LOGGER.warning("last_characters module not found — skipping import.")
