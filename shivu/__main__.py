@@ -1,4 +1,33 @@
-# ... (imports and initializations remain unchanged)
+import asyncio
+import importlib
+import random
+import re
+import time
+from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
+from telegram.ext import (
+    Application,
+    CallbackContext,
+    CommandHandler,
+    MessageHandler,
+    filters,
+)
+from shivu.modules import ALL_MODULES
+from shivu import (
+    collection,
+    group_user_totals_collection,
+    last_characters,
+    last_user,
+    locks,
+    message_counts,
+    sent_characters,
+    top_global_groups_collection,
+    user_collection,
+    user_totals_collection,
+    warned_users,
+    application,
+    LOGGER,
+)
+from html import escape
 
 for module_name in ALL_MODULES:
     importlib.import_module("shivu.modules." + module_name)
@@ -156,6 +185,5 @@ def main() -> None:
     application.run_polling(drop_pending_updates=True)
 
 if __name__ == "__main__":
-    shivuu.start()
     LOGGER.info("Bot started")
     main()
